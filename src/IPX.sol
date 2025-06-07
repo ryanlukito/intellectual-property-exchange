@@ -2,20 +2,20 @@
 pragma solidity ^0.8.13;
 
 import "openzeppelin-contracts/contracts/token/ERC721/ERC721.sol";
-import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {RoyaltyTokenFactory} from "./RoyaltyTokenFactory.sol";
+// import "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+// import {RoyaltyTokenFactory} from "./RoyaltyTokenFactory.sol";
 import "forge-std/console.sol"; // Foundry
 
 contract IPX is ERC721 {
     error InsufficientFunds();
     error InvalidTokenId();
 
-//    uint256 public rentId;
+    // uint256 public rentId;
     uint256 public nextTokenId = 0;
-    RoyaltyTokenFactory public royaltyTokenFactory;
+    // RoyaltyTokenFactory public royaltyTokenFactory;
 
-    constructor(address _royaltyTokenFactory) ERC721("IPX", "IPX") {
-        royaltyTokenFactory = RoyaltyTokenFactory(_royaltyTokenFactory);
+    constructor() ERC721("IPX", "IPX") {
+        // royaltyTokenFactory = RoyaltyTokenFactory(_royaltyTokenFactory);
     }
 
     // IP struct
@@ -24,12 +24,12 @@ contract IPX is ERC721 {
         string title;
         string description;
         uint256 category;
-        string tag;
         string fileUpload;
         uint8 licenseopt;
         uint256 basePrice;
         uint256 rentPrice;
         uint256 royaltyPercentage;
+        uint256 pendingRoyalty;
     }
 
     function logAllIps(uint256 totaldata) public view {
@@ -40,7 +40,6 @@ contract IPX is ERC721 {
             console.log("Title:", ip.title);
             console.log("Description:", ip.description);
             console.log("Category:", ip.category);
-            console.log("Tag:", ip.tag);
             console.log("FileUpload:", ip.fileUpload);
             console.log("LicenseOpt:", ip.licenseopt);
             console.log("BasePrice:", ip.basePrice);
@@ -52,6 +51,7 @@ contract IPX is ERC721 {
     struct Rent {
         address renter;
         uint256 expiresAt;
+        bool isValid;
     }
 
     // Remix Struct
@@ -66,6 +66,16 @@ contract IPX is ERC721 {
         uint256 renterId;
     }
 
+    struct RentedIP {
+        IP ip;
+        Rent rent;
+    }
+
+    struct Royalty {
+        uint256 pendingRoyalty;
+        uint256 claimedRoyalty;
+    }
+
     // Mapping dari tokenId ke IP metadata
     mapping(uint256 => IP) public ips;
 
@@ -78,11 +88,20 @@ contract IPX is ERC721 {
     // id IP => user => data rent
     mapping(uint256 => mapping(address => Rent)) public rental;
 
+    mapping(uint256 => Rent) public rentData; // untuk tiap IP hanya satu penyewa aktif
+
     // id IP => parent IP
     mapping(uint256 => uint256) public parentIds;
 
+    mapping(address => IP[]) public renterIPs;
+ 
+    mapping(address => IP[]) public buyIPs;
+
     // id IP => royalty token
-    mapping(uint256 => address) public royaltyTokens;
+    // mapping(uint256 => address) public royaltyTokens;
+
+    // Mapping untuk menyimpan informasi royalty
+    mapping(uint256 => Royalty) public royalties;
 
     mapping(uint256 => mapping(address => bool)) public hasRemixed;
 
@@ -90,10 +109,6 @@ contract IPX is ERC721 {
     mapping(uint256 => address[]) public remixersOf;
 
     mapping(uint256 => mapping(address => uint256)) public remixTokenOf;
-
-    mapping(address => IP[]) public renterIPs;
-
-    mapping(address => IP[]) public buyIPs;
 
     // helper function untuk keperluan buy [buat map ownerToTokenIds]
     function _removeTokenIdFromOwner(address owner, uint256 tokenId) internal {
@@ -114,7 +129,6 @@ contract IPX is ERC721 {
         string memory _title,
         string memory _description,
         uint256 _category,
-        string memory _tag,
         string memory _fileUpload,
         uint8 _licenseopt,
         uint256 _basePrice,
@@ -128,19 +142,19 @@ contract IPX is ERC721 {
             title: _title,
             description: _description,
             category: _category,
-            tag: _tag,
             fileUpload: _fileUpload,
             licenseopt: _licenseopt,
             basePrice: _basePrice,
             rentPrice: _rentPrice,
-            royaltyPercentage: _royaltyPercentage
+            royaltyPercentage: _royaltyPercentage,
+            pendingRoyalty: 0
         });
 
         ips[tokenId] = newIP;
         _safeMint(msg.sender, tokenId);
-        address rt = royaltyTokenFactory.createRoyaltyToken(_title, _title, tokenId);
-        royaltyTokens[tokenId] = rt;
-        IERC20(rt).transfer(msg.sender, _basePrice);
+        // address rt = royaltyTokenFactory.createRoyaltyToken(_title, _title, tokenId);
+        // royaltyTokens[tokenId] = rt;
+        // IERC20(rt).transfer(msg.sender, _basePrice);
 
         ownerToTokenIds[msg.sender].push(tokenId);
 
@@ -175,12 +189,15 @@ contract IPX is ERC721 {
 
     // Rent IP [dipinjem]
     // ini penentuan duration jadinya
-    function rentIP(uint256 tokenId) public payable {
+    function rentIP(uint256 tokenId, uint256 finalprice) public payable {
         if (tokenId > nextTokenId) revert InvalidTokenId();
         uint256 price = ips[tokenId].rentPrice;
-        uint256 duration = 30 days;
-        if (msg.value < price) revert InsufficientFunds();
-        rental[tokenId][msg.sender] = Rent({expiresAt: block.timestamp + duration, renter: msg.sender});
+        if (finalprice % price != 0) revert("Final price must be a multiple of rent price per day");
+        uint256 durationInDays = finalprice / price;
+        uint256 durationInSeconds = durationInDays * 1 days;
+        if (msg.value < finalprice) revert InsufficientFunds();
+        rental[tokenId][msg.sender] =
+            Rent({expiresAt: block.timestamp + durationInSeconds, renter: msg.sender, isValid: true});
         rents[tokenId].push(msg.sender);
         renterIPs[msg.sender].push(ips[tokenId]);
     }
@@ -192,17 +209,15 @@ contract IPX is ERC721 {
         string memory _title,
         string memory _description,
         uint256 _category,
-        string memory _tag,
         string memory _fileUpload,
-        uint256 _royaltyPercentage,
         uint256 parentId
     ) public returns (uint256) {
         if (parentId > nextTokenId) revert InvalidTokenId();
 
-        uint256 parentRoyaltyRightPercentage = _royaltyPercentage; // equal to 20%
+        // uint256 parentRoyaltyRightPercentage = ips[parentId].royaltyPercentage;
         uint256 tokenId = nextTokenId++;
         _safeMint(msg.sender, tokenId);
-        ips[tokenId] = IP(msg.sender, _title, _description, _category, _tag, _fileUpload, 4, 0, 0, _royaltyPercentage);
+        ips[tokenId] = IP(msg.sender, _title, _description, _category, _fileUpload, 4, 0, 0, 0, 0);
         parentIds[tokenId] = parentId;
 
         if (!hasRemixed[parentId][msg.sender]) {
@@ -214,18 +229,43 @@ contract IPX is ERC721 {
         // Add this line to update the mapping
         ownerToTokenIds[msg.sender].push(tokenId);
 
-        address rt = royaltyTokenFactory.createRoyaltyToken(_title, _title, tokenId);
-        royaltyTokens[tokenId] = rt;
-        uint256 parentRoyaltyRight = (100_000_000e18 * parentRoyaltyRightPercentage) / 100;
-        uint256 creatorRoyaltyRight = 100_000_000e18 - parentRoyaltyRight;
+        // address rt = royaltyTokenFactory.createRoyaltyToken(_title, _title, tokenId);
+        // royaltyTokens[tokenId] = rt;
+        // uint256 parentRoyaltyRight = (100_000_000e18 * parentRoyaltyRightPercentage) / 100;
+        // uint256 creatorRoyaltyRight = 100_000_000e18 - parentRoyaltyRight;
 
-        // transfer to parent royalty token
-        IERC20(rt).transfer(royaltyTokens[parentId], parentRoyaltyRight);
+        // // transfer to parent royalty token
+        // IERC20(rt).transfer(royaltyTokens[parentId], parentRoyaltyRight);
 
-        // transfer to creator
-        IERC20(rt).transfer(msg.sender, creatorRoyaltyRight);
+        // // transfer to creator
+        // IERC20(rt).transfer(msg.sender, creatorRoyaltyRight);
 
         return tokenId;
+    }
+
+    // Fungsi untuk menyetor royalti ke IP parent
+    function depositRoyalty(uint256 remixTokenId) external payable {
+        uint256 parentId = parentIds[remixTokenId];
+        require(parentIds[remixTokenId] < remixTokenId, "Remix must have a valid parentId");
+        if (msg.value == 0) revert("No royalty sent");
+
+        // Transfer royalty to the parent IP
+        ips[parentId].pendingRoyalty += msg.value;
+        royalties[parentId].pendingRoyalty += msg.value;
+    }
+
+    // Fungsi untuk klaim royalti oleh pemilik IP asli
+    function claimRoyalty(uint256 tokenId) external {
+        IP memory ip = ips[tokenId];
+        if (msg.sender != ip.owner) revert("Only IP owner can claim royalties");
+
+        uint256 amount = royalties[tokenId].pendingRoyalty;
+        require(amount > 0, "No royalties to claim");
+
+        royalties[tokenId].pendingRoyalty = 0;
+        royalties[tokenId].claimedRoyalty += amount;
+
+        payable(msg.sender).transfer(amount);
     }
 
     // nanti returnnya address pemilik token
@@ -245,11 +285,12 @@ contract IPX is ERC721 {
         return result;
     }
 
+    // kurang logic yang bukan remix licesenceopt != 3
     // Get IP yang bukan punya owner
     function getIPsNotOwnedBy(address user) public view returns (IP[] memory) {
         uint256 count = 0;
         for (uint256 i = 0; i < nextTokenId; i++) {
-            if (ips[i].owner != user) {
+            if (ips[i].owner != user && ips[i].licenseopt != 3 && ips[i].licenseopt != 4 && !isCurrentlyRentedByUser(i, user)) {
                 count++;
             }
         }
@@ -257,7 +298,7 @@ contract IPX is ERC721 {
         IP[] memory result = new IP[](count);
         uint256 index = 0;
         for (uint256 i = 0; i < nextTokenId; i++) {
-            if (ips[i].owner != user) {
+            if (ips[i].owner != user && ips[i].licenseopt != 3 && ips[i].licenseopt != 4 && !isCurrentlyRentedByUser(i, user)) {
                 result[index++] = ips[i];
             }
         }
@@ -265,25 +306,72 @@ contract IPX is ERC721 {
         return result;
     }
 
-    // Get seluruh IP yang disewa oleh user
-    function getListRent(address renter) public view returns (Rent[] memory) {
+    function getIPsNotOwnedByRemix(address user) public view returns (IP[] memory) {
         uint256 count = 0;
-
-        for (uint256 tokenId = 0; tokenId < nextTokenId; tokenId++) {
-            if (rental[tokenId][renter].expiresAt > block.timestamp) {
+        for (uint256 i = 0; i < nextTokenId; i++) {
+            if (ips[i].owner != user && ips[i].licenseopt == 3) {
                 count++;
             }
         }
 
-        Rent[] memory result = new Rent[](count);
+        IP[] memory result = new IP[](count);
         uint256 index = 0;
-        for (uint256 tokenId = 0; tokenId < nextTokenId; tokenId++) {
-            if (rental[tokenId][renter].expiresAt > block.timestamp) {
-                result[index++] = rental[tokenId][renter];
+        for (uint256 i = 0; i < nextTokenId; i++) {
+            if (ips[i].owner != user && ips[i].licenseopt == 3 && !isCurrentlyRentedByUser(i, user)) {
+                result[index++] = ips[i];
             }
         }
 
         return result;
+    }
+
+    function isCurrentlyRentedByUser(uint256 ipId, address user) internal view returns (bool) {
+        Rent memory rent = rentData[ipId];
+        return rent.renter == user && rent.isValid && rent.expiresAt > block.timestamp;
+    }
+
+    // Get seluruh IP yang disewa oleh user
+    function getListRent(address renter) public returns (RentedIP[] memory) {
+        cleanAllExpiredRents(); // only clean for this user
+
+        uint256 count = 0;
+
+        // Count how many valid rentals this user has
+        for (uint256 tokenId = 0; tokenId < nextTokenId; tokenId++) {
+            if (rental[tokenId][renter].expiresAt > block.timestamp && rental[tokenId][renter].isValid) {
+                count++;
+            }
+        }
+
+        RentedIP[] memory result = new RentedIP[](count);
+        uint256 index = 0;
+
+        for (uint256 tokenId = 0; tokenId < nextTokenId; tokenId++) {
+            Rent storage rent = rental[tokenId][renter];
+            result[index] = RentedIP({ip: ips[tokenId], rent: rent});
+            index++;
+        }
+        return result;
+    }
+
+    function getRoyalty(uint256 tokenId) external view returns (uint256 pending, uint256 claimed) {
+        Royalty memory royalty = royalties[tokenId];
+        return (royalty.pendingRoyalty, royalty.claimedRoyalty);
+    }
+
+    function cleanAllExpiredRents() public {
+        for (uint256 tokenId = 0; tokenId < nextTokenId; tokenId++) {
+            address[] storage renters = rents[tokenId];
+            for (uint256 i = 0; i < renters.length; i++) {
+                address renter = renters[i];
+                if (
+                    rental[tokenId][renter].expiresAt > 0 && rental[tokenId][renter].expiresAt < block.timestamp
+                        && rental[tokenId][renter].isValid
+                ) {
+                    rental[tokenId][renter].isValid = false;
+                }
+            }
+        }
     }
 
     // get non-remixer IP
@@ -304,16 +392,29 @@ contract IPX is ERC721 {
 
     // Kuarng data IPnya yang di remix
     // Get siapa aja yang nge-remix IP user
-    function getMyIPsRemix(uint256 parentTokenId) public view returns (RemixInfo[] memory) {
-        address[] memory remixerAddresses = remixersOf[parentTokenId];
-        RemixInfo[] memory remixList = new RemixInfo[](remixerAddresses.length);
-
-        for (uint256 i = 0; i < remixerAddresses.length; i++) {
-            address remixer = remixerAddresses[i];
-            uint256 remixTokenId = remixTokenOf[parentTokenId][remixer];
-            remixList[i] = RemixInfo({ip: ips[remixTokenId], parentId: parentTokenId});
+    function getMyIPsRemix(address owner) public view returns (RemixInfo[] memory) {
+        // Hitung jumlah IP milik owner yang telah diremix orang lain
+        uint256 count = 0;
+        for (uint256 i = 0; i < nextTokenId; i++) {
+            if (ips[i].owner == owner && remixersOf[i].length > 0) {
+                count++;
+            }
         }
-        return remixList;
+
+        RemixInfo[] memory results = new RemixInfo[](count);
+        uint256 index = 0;
+
+        for (uint256 i = 0; i < nextTokenId; i++) {
+            if (ips[i].owner == owner && remixersOf[i].length > 0) {
+                results[index] = RemixInfo({
+                    ip: ips[i],
+                    parentId: i
+                });
+                index++;
+            }
+        }
+
+        return results;
     }
 
     // Get IP yang user remix
@@ -356,49 +457,47 @@ contract IPX is ERC721 {
             maxRenters += rents[tokenIds[i]].length;
         }
 
-        // Create the result array
+        // Create temporary arrays
         RentInfo[] memory result = new RentInfo[](maxRenters);
         uint256 resultIndex = 0;
 
         // For each token ID owned by the sender
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            uint256 tokenId = tokenIds[i];
-            address[] memory rentersOfToken = rents[tokenId];
+         for (uint256 i = 0; i < tokenIds.length; i++) {
+             uint256 tokenId = tokenIds[i];
+             address[] memory rentersOfToken = rents[tokenId];
+             // For each renter of this token
+             for (uint256 j = 0; j < rentersOfToken.length; j++) {
+                 address renter = rentersOfToken[j];
 
-            // For each renter of this token
-            for (uint256 j = 0; j < rentersOfToken.length; j++) {
-                address renter = rentersOfToken[j];
-
-                // Check if the rental is still active
-                if (rental[tokenId][renter].expiresAt > block.timestamp) {
-                    // Create an array with the single IP for this rental
-                    IP[] memory rentedIP = new IP[](1);
-                    rentedIP[0] = ips[tokenId];
-
-                    // Add the rental info to the result
-                    result[resultIndex] = RentInfo({
-                        ip: rentedIP,
-                        renterId: tokenId
-                    });
-
-                    resultIndex++;
+             // Check if the rental is still active
+                 if (rental[tokenId][renter].expiresAt > block.timestamp) {
+                     // Create an array with the single IP for this rental
+                     IP[] memory rentedIP = new IP[](1);
+                     rentedIP[0] = ips[tokenId];
+ 
+                     // Add the rental info to the result
+                     result[resultIndex] = RentInfo({
+                         ip: rentedIP,
+                         renterId: tokenId
+                     });
+ 
+                     resultIndex++;
                 }
-            }
-        }
+             }
+         }
 
-        // Create a right-sized array if there are fewer active rentals than maxRenters
-        if (resultIndex < maxRenters) {
-            RentInfo[] memory trimmedResult = new RentInfo[](resultIndex);
-            for (uint256 i = 0; i < resultIndex; i++) {
-                trimmedResult[i] = result[i];
-            }
-            return trimmedResult;
-        }
-
+         // Create a right-sized array if there are fewer active rentals than maxRenters
+         if (resultIndex < maxRenters) {
+             RentInfo[] memory trimmedResult = new RentInfo[](resultIndex);
+             for (uint256 i = 0; i < resultIndex; i++) {
+                 trimmedResult[i] = result[i];
+             }
+             return trimmedResult;
+         }
         return result;
     }
 
     function getListBuy() public view returns (IP[] memory) {
-        return buyIPs[msg.sender];
-    }
+         return buyIPs[msg.sender];
+     }
 }
